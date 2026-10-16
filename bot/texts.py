@@ -27,17 +27,19 @@ HELP = (
 )
 
 
-def _fmt_table(rows):
-    """Выравнивает пары (подпись, число) в моноширинную таблицу."""
-    width_label = max(len(label) for label, _ in rows)
-    width_value = max(len(str(value)) for _, value in rows)
+def _fmt_progress(rows):
+    """Моноширинная таблица 'подпись  наверстано / всего'."""
+    width_label = max(len(label) for label, _, _ in rows)
+    width_done = max(len(str(done)) for _, done, _ in rows)
+    width_total = max(len(str(total)) for _, _, total in rows)
     return "\n".join(
-        f"{label:<{width_label}}  {str(value):>{width_value}}" for label, value in rows
+        f"{label:<{width_label}}  {done:>{width_done}} / {total:>{width_total}}"
+        for label, done, total in rows
     )
 
 
 def build_status(counters: dict) -> str:
-    """Собирает текст с остатком долга по намазам и постам.
+    """Собирает текст с прогрессом (наверстано / всего) по намазам и постам.
 
     counters: {kind: (total, done)}
     """
@@ -48,17 +50,17 @@ def build_status(counters: dict) -> str:
         total, done = counters.get(kind, (0, 0))
         total_all += total
         done_all += done
-        rows.append((PRAYER_NAMES[kind], total - done))
+        rows.append((PRAYER_NAMES[kind], done, total))
 
     percent = round(done_all / total_all * 100) if total_all else 0
     text = (
-        "<b>Осталось наверстать:</b>\n"
-        f"<pre>{_fmt_table(rows)}</pre>\n"
-        f"Всего: {done_all} из {total_all} ({percent}% готово)"
+        "<b>Наверстано / всего:</b>\n"
+        f"<pre>{_fmt_progress(rows)}</pre>\n"
+        f"Всего: {done_all} / {total_all} ({percent}%)"
     )
 
     fast_total, fast_done = counters.get(FAST, (0, 0))
     if fast_total > 0:
-        text += f"\n\n🌙 Посты: осталось {fast_total - fast_done} из {fast_total}"
+        text += f"\n\n🌙 Посты: {fast_done} / {fast_total}"
 
     return text

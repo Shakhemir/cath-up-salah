@@ -16,6 +16,7 @@ from .keyboards import (
     edit_kb,
     main_kb,
     reg_method_kb,
+    undo_kb,
 )
 from .states import Edit, FastSetup, Reg
 from .texts import FAST, HELP, PRAYER_NAMES, PRAYERS, build_status
@@ -98,12 +99,47 @@ async def _mark(message: Message, kind: str, n: int) -> None:
 
     if added == 0:
         head = f"{label}: долг уже закрыт ✅"
-    elif added < n:
-        head = f"✅ {label} +{added} (долг закрыт)"
+        markup = None
     else:
-        head = f"✅ {label} +{added}"
+        await db.record_action(uid, {kind: added})
+        head = f"✅ {label} +{added}" + (" (долг закрыт)" if added < n else "")
+        markup = undo_kb()
 
-    await message.answer(head + "\n\n" + build_status(counters))
+    await message.answer(head + "\n\n" + build_status(counters), reply_markup=markup)
+
+
+async def _mark_day(message: Message, n: int) -> None:
+    uid = message.from_user.id
+    if not await db.is_registered(uid):
+        await message.answer(NOT_REGISTERED)
+        return
+
+    changes = {}
+    for kind in PRAYERS:
+        added = await db.add_done(uid, kind, n)
+        if added:
+            changes[kind] = added
+
+    counters = await db.get_counters(uid)
+    if changes:
+        await db.record_action(uid, changes)
+        head = "✅ Отмечен день" if n == 1 else f"✅ Отмечено дней: {n}"
+        markup = undo_kb()
+    else:
+        head = "Долг по намазам уже закрыт ✅"
+        markup = None
+
+    await message.answer(head + "\n\n" + build_status(counters), reply_markup=markup)
+
+
+async def _do_undo(user_id: int):
+    """Откатывает последнее действие. Возвращает counters или None, если нечего."""
+    changes = await db.pop_action(user_id)
+    if not changes:
+        return None
+    for kind, delta in changes.items():
+        await db.undo_done(user_id, kind, delta)
+    return await db.get_counters(user_id)
 
 
 async def _show_status(message: Message) -> None:
@@ -261,19 +297,11 @@ async def cmd_prayer(message: Message, command: CommandObject) -> None:
 
 @router.message(Command("day"))
 async def cmd_day(message: Message, command: CommandObject) -> None:
-    uid = message.from_user.id
-    if not await db.is_registered(uid):
-        await message.answer(NOT_REGISTERED)
-        return
     n, error = _parse_count(command)
     if error:
         await message.answer(error)
         return
-    for kind in PRAYERS:
-        await db.add_done(uid, kind, n)
-    counters = await db.get_counters(uid)
-    head = "✅ Отмечен день" if n == 1 else f"✅ Отмечено дней: {n}"
-    await message.answer(head + "\n\n" + build_status(counters))
+    await _mark_day(message, n)
 
 
 @router.message(Command("fast"))
@@ -387,6 +415,29 @@ async def edit_value(message: Message, state: FSMContext) -> None:
 # ──────────────────────────── статус / сброс / помощь ────────────────────────────
 
 
+@router.message(Command("undo"))
+async def cmd_undo(message: Message) -> None:
+    if not await db.is_registered(message.from_user.id):
+        await message.answer(NOT_REGISTERED)
+        return
+    counters = await _do_undo(message.from_user.id)
+    if counters is None:
+        await message.answer("Нечего отменять.")
+        return
+    await message.answer("↩️ Отменено\n\n" + build_status(counters))
+
+
+@router.callback_query(F.data == "undo:do")
+async def undo_cb(callback: CallbackQuery) -> None:
+    counters = await _do_undo(callback.from_user.id)
+    if counters is None:
+        await callback.answer("Нечего отменять")
+        return
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer("↩️ Отменено\n\n" + build_status(counters))
+    await callback.answer()
+
+
 @router.message(Command("status"))
 async def cmd_status(message: Message) -> None:
     await _show_status(message)
@@ -429,14 +480,7 @@ async def kb_status(message: Message) -> None:
 
 @router.message(StateFilter(None), F.text == BTN_DAY)
 async def kb_day(message: Message) -> None:
-    uid = message.from_user.id
-    if not await db.is_registered(uid):
-        await message.answer(NOT_REGISTERED)
-        return
-    for kind in PRAYERS:
-        await db.add_done(uid, kind, 1)
-    counters = await db.get_counters(uid)
-    await message.answer("✅ Отмечен день\n\n" + build_status(counters))
+    await _mark_day(message, 1)
 
 
 @router.message(StateFilter(None), F.text == BTN_FAST)

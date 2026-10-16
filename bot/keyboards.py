@@ -66,6 +66,14 @@ def edit_kb() -> InlineKeyboardMarkup:
     )
 
 
+def undo_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="↩️ Отменить", callback_data="undo:do")]
+        ]
+    )
+
+
 def confirm_reset_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

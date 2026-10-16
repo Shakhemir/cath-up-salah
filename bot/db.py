@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 import aiosqlite
@@ -18,6 +19,13 @@ CREATE TABLE IF NOT EXISTS counters (
     total   INTEGER NOT NULL DEFAULT 0,
     done    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, kind)
+);
+
+-- Последнее действие пользователя для отмены (/undo).
+-- changes: JSON {kind: сколько зачтено}, например {"fajr": 1} или {"fajr": 5, "dhuhr": 5}
+CREATE TABLE IF NOT EXISTS last_action (
+    user_id INTEGER PRIMARY KEY,
+    changes TEXT NOT NULL
 );
 """
 
@@ -51,6 +59,7 @@ async def register_all(user_id: int, days: int, years=None) -> None:
                 "VALUES (?, ?, ?, 0)",
                 (user_id, kind, days),
             )
+        await db.execute("DELETE FROM last_action WHERE user_id = ?", (user_id,))
         await db.commit()
 
 
@@ -64,6 +73,7 @@ async def register_each(user_id: int, totals: dict) -> None:
                 "VALUES (?, ?, ?, 0)",
                 (user_id, kind, int(totals.get(kind, 0))),
             )
+        await db.execute("DELETE FROM last_action WHERE user_id = ?", (user_id,))
         await db.commit()
 
 
@@ -113,6 +123,56 @@ async def add_done(user_id: int, kind: str, n: int) -> int:
         return added
 
 
+async def undo_done(user_id: int, kind: str, n: int) -> int:
+    """Откатывает n зачтённых единиц (done уменьшается, но не ниже 0).
+    Возвращает фактически откатанное число."""
+    async with aiosqlite.connect(settings.db_path) as db:
+        cur = await db.execute(
+            "SELECT done FROM counters WHERE user_id = ? AND kind = ?",
+            (user_id, kind),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return 0
+        done = row[0]
+        new_done = max(0, done - n)
+        removed = done - new_done
+        if removed:
+            await db.execute(
+                "UPDATE counters SET done = ? WHERE user_id = ? AND kind = ?",
+                (new_done, user_id, kind),
+            )
+            await db.commit()
+        return removed
+
+
+async def record_action(user_id: int, changes: dict) -> None:
+    """Запоминает последнее действие (для /undo). Пустое — очищает."""
+    async with aiosqlite.connect(settings.db_path) as db:
+        if changes:
+            await db.execute(
+                "INSERT OR REPLACE INTO last_action (user_id, changes) VALUES (?, ?)",
+                (user_id, json.dumps(changes)),
+            )
+        else:
+            await db.execute("DELETE FROM last_action WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+
+async def pop_action(user_id: int):
+    """Возвращает и удаляет последнее действие ({kind: n}) или None."""
+    async with aiosqlite.connect(settings.db_path) as db:
+        cur = await db.execute(
+            "SELECT changes FROM last_action WHERE user_id = ?", (user_id,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        await db.execute("DELETE FROM last_action WHERE user_id = ?", (user_id,))
+        await db.commit()
+        return json.loads(row[0])
+
+
 async def get_counters(user_id: int) -> dict:
     """Возвращает {kind: (total, done)}."""
     async with aiosqlite.connect(settings.db_path) as db:
@@ -126,5 +186,6 @@ async def get_counters(user_id: int) -> dict:
 async def reset_user(user_id: int) -> None:
     async with aiosqlite.connect(settings.db_path) as db:
         await db.execute("DELETE FROM counters WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM last_action WHERE user_id = ?", (user_id,))
         await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
         await db.commit()

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import aiosqlite
 
 from .config import settings
-from .texts import PRAYERS, FAST
+from .texts import PRAYERS
 
 INIT_SQL = """
 CREATE TABLE IF NOT EXISTS users (
@@ -34,14 +34,17 @@ async def is_registered(user_id: int) -> bool:
         return await cur.fetchone() is not None
 
 
-async def register_user(user_id: int, years: float) -> int:
-    """Создаёт пользователя и счётчики намазов. Возвращает число дней долга."""
-    days = max(0, round(years * settings.days_per_year))
+async def _upsert_user(db: aiosqlite.Connection, user_id: int, years) -> None:
+    await db.execute(
+        "INSERT OR REPLACE INTO users (user_id, years, created_at) VALUES (?, ?, ?)",
+        (user_id, years, datetime.now(timezone.utc).isoformat()),
+    )
+
+
+async def register_all(user_id: int, days: int, years=None) -> None:
+    """Регистрация: одинаковый долг (в днях) по каждому из 5 намазов."""
     async with aiosqlite.connect(settings.db_path) as db:
-        await db.execute(
-            "INSERT OR REPLACE INTO users (user_id, years, created_at) VALUES (?, ?, ?)",
-            (user_id, years, datetime.now(timezone.utc).isoformat()),
-        )
+        await _upsert_user(db, user_id, years)
         for kind in PRAYERS:
             await db.execute(
                 "INSERT OR REPLACE INTO counters (user_id, kind, total, done) "
@@ -49,7 +52,42 @@ async def register_user(user_id: int, years: float) -> int:
                 (user_id, kind, days),
             )
         await db.commit()
-    return days
+
+
+async def register_each(user_id: int, totals: dict) -> None:
+    """Регистрация: свой долг (в днях) для каждого намаза."""
+    async with aiosqlite.connect(settings.db_path) as db:
+        await _upsert_user(db, user_id, None)
+        for kind in PRAYERS:
+            await db.execute(
+                "INSERT OR REPLACE INTO counters (user_id, kind, total, done) "
+                "VALUES (?, ?, ?, 0)",
+                (user_id, kind, int(totals.get(kind, 0))),
+            )
+        await db.commit()
+
+
+async def set_total(user_id: int, kind: str, total: int) -> None:
+    """Задаёт/меняет долг (total) для счётчика. Прогресс (done) сохраняется
+    и подрезается до нового total, чтобы остаток не уходил в минус."""
+    async with aiosqlite.connect(settings.db_path) as db:
+        cur = await db.execute(
+            "SELECT done FROM counters WHERE user_id = ? AND kind = ?",
+            (user_id, kind),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            await db.execute(
+                "INSERT INTO counters (user_id, kind, total, done) VALUES (?, ?, ?, 0)",
+                (user_id, kind, total),
+            )
+        else:
+            done = min(row[0], total)
+            await db.execute(
+                "UPDATE counters SET total = ?, done = ? WHERE user_id = ? AND kind = ?",
+                (total, done, user_id, kind),
+            )
+        await db.commit()
 
 
 async def add_done(user_id: int, kind: str, n: int) -> int:
@@ -73,28 +111,6 @@ async def add_done(user_id: int, kind: str, n: int) -> int:
             )
             await db.commit()
         return added
-
-
-async def set_fast(user_id: int, days: int) -> None:
-    """Задаёт долг по постам. Прогресс (done) сохраняется и не превышает новый total."""
-    async with aiosqlite.connect(settings.db_path) as db:
-        cur = await db.execute(
-            "SELECT done FROM counters WHERE user_id = ? AND kind = ?",
-            (user_id, FAST),
-        )
-        row = await cur.fetchone()
-        if row is None:
-            await db.execute(
-                "INSERT INTO counters (user_id, kind, total, done) VALUES (?, ?, ?, 0)",
-                (user_id, FAST, days),
-            )
-        else:
-            done = min(row[0], days)
-            await db.execute(
-                "UPDATE counters SET total = ?, done = ? WHERE user_id = ? AND kind = ?",
-                (days, done, user_id, FAST),
-            )
-        await db.commit()
 
 
 async def get_counters(user_id: int) -> dict:

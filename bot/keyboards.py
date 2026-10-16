@@ -5,7 +5,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-from .texts import PRAYER_NAMES
+from .texts import PRAYER_NAMES, PRAYERS
 
 # Кнопка -> ключ намаза (обратное соответствие названиям)
 NAME_TO_KIND = {name: kind for kind, name in PRAYER_NAMES.items()}
@@ -35,10 +35,33 @@ def main_kb() -> ReplyKeyboardMarkup:
 
 
 def reg_method_kb() -> InlineKeyboardMarkup:
+    """Выбор способа задать долг — от грубого к точному."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Указать годы", callback_data="reg:years")],
-            [InlineKeyboardButton(text="Период (с — по)", callback_data="reg:period")],
+            [
+                InlineKeyboardButton(text="Годами", callback_data="reg:years"),
+                InlineKeyboardButton(text="По датам", callback_data="reg:dates"),
+            ],
+            [
+                InlineKeyboardButton(text="В днях", callback_data="reg:days"),
+                InlineKeyboardButton(text="По каждому намазу", callback_data="reg:each"),
+            ],
+        ]
+    )
+
+
+def edit_kb() -> InlineKeyboardMarkup:
+    """Выбор, какой долг (в днях) редактировать."""
+    prayer_buttons = [
+        InlineKeyboardButton(text=PRAYER_NAMES[k], callback_data=f"edit:{k}")
+        for k in PRAYERS
+    ]
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            prayer_buttons[:3],
+            prayer_buttons[3:],
+            [InlineKeyboardButton(text="Все намазы", callback_data="edit:all")],
+            [InlineKeyboardButton(text=BTN_FAST, callback_data="edit:fast")],
         ]
     )
 

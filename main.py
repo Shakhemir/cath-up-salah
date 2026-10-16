@@ -31,6 +31,7 @@ COMMANDS = [
     BotCommand(command="day", description="Отметить целый день"),
     BotCommand(command="fast", description="Отметить пост"),
     BotCommand(command="fasts", description="Настроить долг постов"),
+    BotCommand(command="edit", description="Изменить долг по дням"),
     BotCommand(command="status", description="Положение"),
     BotCommand(command="reset", description="Сбросить"),
     BotCommand(command="help", description="Помощь"),

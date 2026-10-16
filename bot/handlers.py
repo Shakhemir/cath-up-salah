@@ -1,27 +1,32 @@
+from datetime import date, datetime
+
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from . import db
+from .config import settings
 from .keyboards import (
     BTN_DAY,
     BTN_FAST,
     BTN_STATUS,
     NAME_TO_KIND,
     confirm_reset_kb,
+    edit_kb,
     main_kb,
     reg_method_kb,
 )
-from .states import FastSetup, Reg
+from .states import Edit, FastSetup, Reg
 from .texts import FAST, HELP, PRAYER_NAMES, PRAYERS, build_status
 
 router = Router()
 
 NOT_REGISTERED = "Сначала регистрация: /start"
+EDIT_TARGETS = PRAYERS + ["all", FAST]
 
 
-# ──────────────────────────── вспомогательные ────────────────────────────
+# ──────────────────────────── парсеры ────────────────────────────
 
 
 def _parse_years(text: str):
@@ -35,12 +40,11 @@ def _parse_years(text: str):
     return value
 
 
-def _parse_year(text: str):
+def _parse_date(text: str):
     try:
-        year = int((text or "").strip())
+        return datetime.strptime((text or "").strip(), "%d.%m.%Y").date()
     except ValueError:
         return None
-    return year if 1900 <= year <= 2100 else None
 
 
 def _parse_positive_int(text: str):
@@ -49,6 +53,14 @@ def _parse_positive_int(text: str):
     except ValueError:
         return None
     return value if value > 0 else None
+
+
+def _parse_nonneg_int(text: str):
+    try:
+        value = int((text or "").strip())
+    except ValueError:
+        return None
+    return value if value >= 0 else None
 
 
 def _parse_count(command: CommandObject | None):
@@ -63,6 +75,9 @@ def _parse_count(command: CommandObject | None):
     if n <= 0:
         return None, "Число должно быть больше нуля."
     return n, None
+
+
+# ──────────────────────────── общие помощники ────────────────────────────
 
 
 async def _mark(message: Message, kind: str, n: int) -> None:
@@ -100,13 +115,13 @@ async def _show_status(message: Message) -> None:
     await message.answer(build_status(counters), reply_markup=main_kb())
 
 
-async def _finish_registration(message: Message, state: FSMContext, years: float) -> None:
-    days = await db.register_user(message.from_user.id, years)
+async def _after_registration(message: Message, state: FSMContext) -> None:
     await state.clear()
     counters = await db.get_counters(message.from_user.id)
     await message.answer(
-        f"✅ Готово! Долг: {years:g} лет ≈ {days} дней — по {days} каждого намаза.\n\n"
-        "Отмечай наверстанное кнопками ниже или командами (/help).\n\n"
+        "✅ Готово!\n"
+        "Отмечай наверстанное кнопками ниже или командами (/help).\n"
+        "Уточнить долг по дням можно в любой момент: /edit\n\n"
         + build_status(counters),
         reply_markup=main_kb(),
     )
@@ -128,7 +143,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Ассаламу алейкум! 🤲\n"
         "Бот помогает наверстать долговые намазы (и посты).\n\n"
-        "Сколько лет долга нужно наверстать?",
+        "Как задать долг? (от грубого к точному — потом можно уточнить /edit)",
         reply_markup=reg_method_kb(),
     )
 
@@ -136,14 +151,32 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "reg:years")
 async def reg_years(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(Reg.years)
-    await callback.message.answer("Введи число лет (например 5):")
+    await callback.message.answer("Сколько лет долга? (например 5):")
     await callback.answer()
 
 
-@router.callback_query(F.data == "reg:period")
-async def reg_period(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(Reg.period_start)
-    await callback.message.answer("С какого года начать? (например 2015):")
+@router.callback_query(F.data == "reg:days")
+async def reg_days(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Reg.days)
+    await callback.message.answer("Сколько дней долга? (одинаково на каждый намаз):")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "reg:dates")
+async def reg_dates(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Reg.date_start)
+    await callback.message.answer("С какой даты начался долг? Формат ДД.ММ.ГГГГ (например 01.03.2015):")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "reg:each")
+async def reg_each(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Reg.each)
+    await state.update_data(idx=0, totals={})
+    await callback.message.answer(
+        "Долг по дням для каждого намаза по очереди.\n"
+        f"{PRAYER_NAMES[PRAYERS[0]]}: сколько дней?"
+    )
     await callback.answer()
 
 
@@ -153,32 +186,65 @@ async def reg_years_input(message: Message, state: FSMContext) -> None:
     if years is None:
         await message.answer("Введи положительное число лет, например 5.")
         return
-    await _finish_registration(message, state, years)
+    days = max(0, round(years * settings.days_per_year))
+    await db.register_all(message.from_user.id, days, years=years)
+    await _after_registration(message, state)
 
 
-@router.message(Reg.period_start)
-async def reg_period_start(message: Message, state: FSMContext) -> None:
-    year = _parse_year(message.text)
-    if year is None:
-        await message.answer("Введи год четырьмя цифрами, например 2015.")
+@router.message(Reg.days)
+async def reg_days_input(message: Message, state: FSMContext) -> None:
+    days = _parse_positive_int(message.text)
+    if days is None:
+        await message.answer("Введи целое число дней, например 1825.")
         return
-    await state.update_data(start=year)
-    await state.set_state(Reg.period_end)
-    await message.answer("По какой год? (например 2020):")
+    await db.register_all(message.from_user.id, days)
+    await _after_registration(message, state)
 
 
-@router.message(Reg.period_end)
-async def reg_period_end(message: Message, state: FSMContext) -> None:
-    end = _parse_year(message.text)
+@router.message(Reg.date_start)
+async def reg_date_start(message: Message, state: FSMContext) -> None:
+    start = _parse_date(message.text)
+    if start is None:
+        await message.answer("Введи дату в формате ДД.ММ.ГГГГ, например 01.03.2015.")
+        return
+    await state.update_data(start=start.isoformat())
+    await state.set_state(Reg.date_end)
+    await message.answer("По какую дату? Формат ДД.ММ.ГГГГ (например 15.06.2020):")
+
+
+@router.message(Reg.date_end)
+async def reg_date_end(message: Message, state: FSMContext) -> None:
+    end = _parse_date(message.text)
     if end is None:
-        await message.answer("Введи год четырьмя цифрами, например 2020.")
+        await message.answer("Введи дату в формате ДД.ММ.ГГГГ, например 15.06.2020.")
         return
     data = await state.get_data()
-    years = end - data["start"]
-    if years <= 0:
-        await message.answer("Конечный год должен быть больше начального. Введи ещё раз:")
+    start = date.fromisoformat(data["start"])
+    days = (end - start).days + 1  # обе даты включительно
+    if days <= 0:
+        await message.answer("Конечная дата должна быть не раньше начальной. Введи ещё раз:")
         return
-    await _finish_registration(message, state, years)
+    await db.register_all(message.from_user.id, days)
+    await _after_registration(message, state)
+
+
+@router.message(Reg.each)
+async def reg_each_input(message: Message, state: FSMContext) -> None:
+    value = _parse_nonneg_int(message.text)
+    if value is None:
+        await message.answer("Введи целое число дней (0 — если долга нет):")
+        return
+    data = await state.get_data()
+    idx = data["idx"]
+    totals = data["totals"]
+    totals[PRAYERS[idx]] = value
+    idx += 1
+    if idx < len(PRAYERS):
+        await state.update_data(idx=idx, totals=totals)
+        await message.answer(f"{PRAYER_NAMES[PRAYERS[idx]]}: сколько дней?")
+        return
+    await db.register_each(message.from_user.id, totals)
+    await _after_registration(message, state)
 
 
 # ──────────────────────────── отметки намазов ────────────────────────────
@@ -237,13 +303,85 @@ async def fasts_amount(message: Message, state: FSMContext) -> None:
     if days is None:
         await message.answer("Введи целое число дней, например 30.")
         return
-    await db.set_fast(message.from_user.id, days)
+    await db.set_total(message.from_user.id, FAST, days)
     await state.clear()
     counters = await db.get_counters(message.from_user.id)
     await message.answer(
         f"🌙 Долг по постам: {days} дней.\n\n" + build_status(counters),
         reply_markup=main_kb(),
     )
+
+
+# ──────────────────────────── редактирование долга ────────────────────────────
+
+
+async def _apply_edit(message: Message, target: str, value: int) -> None:
+    uid = message.from_user.id
+    if target == "all":
+        for kind in PRAYERS:
+            await db.set_total(uid, kind, value)
+    else:
+        await db.set_total(uid, target, value)
+    counters = await db.get_counters(uid)
+    await message.answer("✅ Долг обновлён.\n\n" + build_status(counters))
+
+
+@router.message(Command("edit"))
+async def cmd_edit(message: Message, command: CommandObject, state: FSMContext) -> None:
+    if not await db.is_registered(message.from_user.id):
+        await message.answer(NOT_REGISTERED)
+        return
+
+    # Быстрый формат: /edit <намаз|all|fast> <дней>
+    if command.args:
+        parts = command.args.split()
+        if len(parts) != 2:
+            await message.answer(
+                "Формат: /edit &lt;намаз|all|fast&gt; &lt;дней&gt;\nНапример: /edit fajr 1700"
+            )
+            return
+        target = parts[0].lower()
+        if target not in EDIT_TARGETS:
+            await message.answer("Доступно: fajr, dhuhr, asr, maghrib, isha, all, fast")
+            return
+        value = _parse_nonneg_int(parts[1])
+        if value is None:
+            await message.answer("Число дней — целое ≥ 0.")
+            return
+        await _apply_edit(message, target, value)
+        return
+
+    await message.answer("Что отредактировать? (долг в днях)", reply_markup=edit_kb())
+
+
+@router.callback_query(F.data.startswith("edit:"))
+async def edit_choose(callback: CallbackQuery, state: FSMContext) -> None:
+    target = callback.data.split(":", 1)[1]
+    await state.set_state(Edit.value)
+    await state.update_data(target=target)
+
+    if target == "all":
+        prompt = "Новый долг (дней) для ВСЕХ намазов:"
+    else:
+        counters = await db.get_counters(callback.from_user.id)
+        total, done = counters.get(target, (0, 0))
+        label = "🌙 Пост" if target == FAST else PRAYER_NAMES[target]
+        prompt = f"{label}: сейчас долг {total}, сделано {done}.\nНовый долг (дней):"
+
+    await callback.message.answer(prompt)
+    await callback.answer()
+
+
+@router.message(Edit.value)
+async def edit_value(message: Message, state: FSMContext) -> None:
+    value = _parse_nonneg_int(message.text)
+    if value is None:
+        await message.answer("Введи целое число дней ≥ 0.")
+        return
+    data = await state.get_data()
+    target = data["target"]
+    await state.clear()
+    await _apply_edit(message, target, value)
 
 
 # ──────────────────────────── статус / сброс / помощь ────────────────────────────

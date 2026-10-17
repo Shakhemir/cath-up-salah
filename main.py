@@ -3,6 +3,8 @@ from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, Update
@@ -14,8 +16,15 @@ from bot.handlers import router
 
 logging.basicConfig(level=logging.INFO)
 
+# Необязательное переопределение адреса Telegram Bot API
+session = None
+if settings.tg_api_url:
+    session = AiohttpSession(api=TelegramAPIServer.from_base(settings.tg_api_url))
+    logging.info("Telegram API URL overridden: %s", settings.tg_api_url)
+
 bot = Bot(
     token=settings.bot_token,
+    session=session,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher(storage=MemoryStorage())

@@ -64,6 +64,7 @@ python polling.py
 | `WEBHOOK_PATH` | путь эндпоинта вебхука | `/webhook` |
 | `WEBHOOK_SECRET` | секрет заголовка Telegram | `` |
 | `HOST` / `PORT` | адрес uvicorn | `0.0.0.0` / `8080` |
+| `TG_API_URL` | свой адрес Telegram Bot API (локальный сервер/прокси); пусто = `api.telegram.org` | `` |
 | `DB_PATH` | файл SQLite | `salah.db` |
 | `DAYS_PER_YEAR` | дней в году долга | `365` |
 

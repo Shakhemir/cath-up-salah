@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
 
+    # Необязательный базовый URL Telegram Bot API (напр. локальный Bot API сервер
+    # http://localhost:8081 или прокси). Если задан — переопределяет api.telegram.org.
+    tg_api_url: str | None = None
+
     db_path: str = "salah.db"
     days_per_year: int = 365
 

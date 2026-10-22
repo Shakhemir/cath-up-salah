@@ -1,11 +1,14 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, Update
 from fastapi import FastAPI, Request, Response
@@ -16,11 +19,49 @@ from bot.handlers import router
 
 logging.basicConfig(level=logging.INFO)
 
+
+class RetryRequestMiddleware(BaseRequestMiddleware):
+    """Повторяет исходящие запросы к Telegram при сетевых сбоях/таймаутах.
+
+    Иногда соединение с Bot API зависает и отправка ответа падает с
+    TelegramNetworkError. Без повтора пользователь не получит подтверждение
+    (хотя отметка в БД уже сделана) и может внести данные повторно. Повторяем
+    запрос с новым соединением, чтобы ответ гарантированно дошёл.
+    """
+
+    def __init__(self, retries: int = 3, delay: float = 1.0) -> None:
+        self.retries = retries
+        self.delay = delay
+
+    async def __call__(self, make_request, bot, method):
+        for attempt in range(1, self.retries + 1):
+            try:
+                return await make_request(bot, method)
+            except TelegramNetworkError as e:
+                if attempt == self.retries:
+                    raise
+                logging.warning(
+                    "Telegram %s: сетевой сбой (попытка %s/%s): %s — повтор через %.1fs",
+                    type(method).__name__, attempt, self.retries, e, self.delay * attempt,
+                )
+                await asyncio.sleep(self.delay * attempt)
+
+
+# Короткий таймаут на один запрос к Telegram: зависшее соединение быстро
+# обрывается, и RetryRequestMiddleware успевает повторить отправку, пока
+# Telegram ждёт ответ на вебхук.
+REQUEST_TIMEOUT = 15.0
+
 # Необязательное переопределение адреса Telegram Bot API
-session = None
 if settings.tg_api_url:
-    session = AiohttpSession(api=TelegramAPIServer.from_base(settings.tg_api_url))
+    session = AiohttpSession(
+        api=TelegramAPIServer.from_base(settings.tg_api_url), timeout=REQUEST_TIMEOUT
+    )
     logging.info("Telegram API URL overridden: %s", settings.tg_api_url)
+else:
+    session = AiohttpSession(timeout=REQUEST_TIMEOUT)
+
+session.middleware.register(RetryRequestMiddleware())
 
 bot = Bot(
     token=settings.bot_token,
@@ -91,7 +132,12 @@ async def telegram_webhook(request: Request) -> Response:
     if len(_processed_updates) > _MAX_PROCESSED_UPDATES:
         # dict сохраняет порядок вставки — удаляем самый старый update_id
         del _processed_updates[next(iter(_processed_updates))]
-    await dp.feed_update(bot, update)
+    try:
+        await dp.feed_update(bot, update)
+    except Exception:
+        # Всегда отвечаем 200: повтор апдейта Telegram'ом всё равно будет
+        # отброшен дедупликацией, а отметка в БД уже сделана.
+        logging.exception("Update %s failed", update.update_id)
     return Response(status_code=200)
 
 

@@ -70,6 +70,12 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Защита от повторных вебхуков: при проблемах со связью Telegram может прислать
+# один и тот же апдейт несколько раз. Храним уже обработанные update_id и
+# игнорируем дубликаты. Размер ограничиваем, чтобы словарь не рос бесконечно.
+_MAX_PROCESSED_UPDATES = 1_000
+_processed_updates: dict[int, None] = {}
+
 
 @app.post(settings.webhook_path)
 async def telegram_webhook(request: Request) -> Response:
@@ -78,6 +84,13 @@ async def telegram_webhook(request: Request) -> Response:
         if header != settings.webhook_secret:
             return Response(status_code=401)
     update = Update.model_validate(await request.json(), context={"bot": bot})
+    if update.update_id in _processed_updates:
+        logging.info("Duplicate update ignored: %s", update.update_id)
+        return Response(status_code=200)
+    _processed_updates[update.update_id] = None
+    if len(_processed_updates) > _MAX_PROCESSED_UPDATES:
+        # dict сохраняет порядок вставки — удаляем самый старый update_id
+        del _processed_updates[next(iter(_processed_updates))]
     await dp.feed_update(bot, update)
     return Response(status_code=200)
 
